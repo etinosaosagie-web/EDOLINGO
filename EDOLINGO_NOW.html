@@ -1,0 +1,1214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EDOLINGO - Global Talent Visa App</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Inter Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;400;700;900&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --color-primary: #FFC72C;
+            --color-secondary: #3A5AFE;
+            --color-bg: #0A0E1A;
+            --color-card: #101728;
+            --color-input: #182035;
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--color-bg);
+        }
+        .edo-btn {
+            padding: 0.75rem 2rem;
+            border-radius: 0.75rem;
+            font-weight: 700;
+            transition: all 200ms ease-in-out;
+            transform: scale(1);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+        }
+        .primary-btn {
+            background-color: var(--color-primary);
+            color: var(--color-bg);
+            box-shadow: 0 10px 15px -3px rgba(255, 199, 44, 0.3), 0 4px 6px -4px rgba(255, 199, 44, 0.1);
+        }
+        .primary-btn:hover {
+            background-color: #ffd764;
+            transform: scale(1.02);
+        }
+        .secondary-btn {
+            background-color: var(--color-input);
+            color: #ccc;
+            border: 1px solid #374151;
+            box-shadow: inset 0 2px 4px 0 rgba(0, 0, 0, 0.6);
+        }
+        .secondary-btn:hover {
+            background-color: #20273d;
+            transform: scale(1.01);
+        }
+        .gpa-card {
+            background-color: var(--color-card);
+            border-radius: 1rem;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3), 0 8px 10px -6px rgba(0, 0, 0, 0.2);
+            padding: 1.5rem;
+            border: 1px solid #182035;
+        }
+        .gpa-card-inner {
+            background-color: var(--color-input);
+            border-radius: 0.75rem;
+            padding: 1rem;
+            border: 1px solid #374151;
+        }
+        .text-ellipsis {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        @keyframes pulse-yellow {
+            0%, 100% { background-color: rgba(255, 199, 44, 0.1); border-color: #FFC72C; }
+            50% { background-color: rgba(255, 199, 44, 0.2); border-color: #FFC72C80; }
+        }
+        .animate-rank-pulse {
+            animation: pulse-yellow 2s infinite;
+        }
+        /* Loading Spinner */
+        .loader {
+            width: 60px; height: 60px; 
+            border: 6px solid currentColor; 
+            border-top-color: transparent; 
+            border-radius: 50%;
+        }
+    </style>
+</head>
+<body class="bg-[#0A0E1A] min-h-screen text-gray-100">
+
+    <!-- App Container -->
+    <div id="app-container">
+        <header id="app-header" class="bg-[#101728] shadow-2xl sticky top-0 z-30">
+            <!-- Header content will be injected here -->
+        </header>
+        
+        <main id="app-main" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+            <!-- Main content will be injected here -->
+        </main>
+    </div>
+
+    <!-- Firebase SDK Imports (MUST be separate script tags for ES Module loading) -->
+    <script type="module">
+        // FIX: Moved setLogLevel to firebase-app.js import
+        import { initializeApp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection, query, runTransaction } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Expose Firebase imports globally for the main script block
+        window.firebase = {
+            initializeApp, setLogLevel, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged,
+            getFirestore, doc, setDoc, onSnapshot, collection, query, runTransaction
+        };
+        
+        // Ensure main script runs after imports are complete
+        if (typeof window.startApp === 'function') {
+            window.startApp();
+        }
+    </script>
+    
+    <!-- Main Application Logic -->
+    <script type="module">
+        // --- Global Setup & Utility Functions (Re-declared for clarity in the JS file) ---
+
+        // Environment variables
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'edolingo-default';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        const apiKey = "AIzaSyB_wpPNfUTxVBL-jhcYsC9e0NEIqBhf02o"; // Used for Gemini API calls
+
+        // Data Models
+        const defaultProfile = {
+            userId: '', level: 1, xp: 0, nextLevelXp: 100,
+            currentLanguage: 'Benin (Bini)', history: [],
+            displayName: 'Edo Learner', firstTime: true,
+        };
+
+        const defaultSession = {
+            language: '', module: '', questionIndex: 0, questions: [], score: 0,
+            isAnswered: false, userAnswer: '', feedback: '', feedbackColor: 'text-gray-400',
+        };
+
+        const languageData = {
+            'Benin (Bini)': {
+                color: 'text-green-500', accent: 'bg-green-500', icon: '👑',
+                modules: {
+                    Listening: [
+                        { type: 'Listening', audioText: "Kha yo. Wó gha re.", prompt: "What greeting was spoken?", answer: "Welcome", options: ["Goodbye", "Welcome", "Thank you", "The rain fell"], xpValue: 40 },
+                        { type: 'Listening', audioText: "Omon khian ovbiye.", prompt: "Translate the phrase about the child.", answer: "The child is intelligent.", options: ["The child is crying.", "The child is intelligent.", "The child is small.", "The child is playing."], xpValue: 40 },
+                        { type: 'Listening', audioText: "Iyà mi khian Oba.", prompt: "Who is the speaker referring to?", answer: "My father is the King.", options: ["My mother is the Queen.", "My friend is a doctor.", "My father is the King.", "My neighbor is rich."], xpValue: 40 },
+                    ],
+                    Writing: [
+                        { type: 'Writing', prompt: "Translate: 'The sun is hot today.'", answer: "Ede khian ufi.", options: [], xpValue: 30 },
+                        { type: 'Writing', prompt: "Translate: 'I am going to the market.'", answer: "M'ode Ekenwan.", options: [], xpValue: 30 },
+                        { type: 'Writing', prompt: "Translate: 'The water is clean.'", answer: "Ame rhiogbe.", options: [], xpValue: 30 },
+                    ],
+                    Pronunciation: [
+                        { type: 'Pronunciation', prompt: "Oba", answer: "King/Ruler", options: [], xpValue: 50 },
+                        { type: 'Pronunciation', prompt: "Ikhuen", answer: "Beads", options: [], xpValue: 50 },
+                        { type: 'Pronunciation', prompt: "Edo", answer: "Bini language/people", options: [], xpValue: 50 },
+                    ],
+                    Quiz: [
+                        { type: 'Quiz', prompt: "What is the Bini word for 'Bead'?", answer: "Ikhuen", options: ["Ekenwan", "Ikhuen", "Omon", "Oko"], xpValue: 20 },
+                        { type: 'Quiz', prompt: "A common term for 'Welcome' is:", answer: "Kha yo", options: ["Kha yo", "Wa do", "Omon", "Ayeye"], xpValue: 20 },
+                    ],
+                    Image: [
+                        { type: 'Image', prompt: "Which image represents 'The Palace'?", answer: "Palace", options: ["Tree", "House", "Palace", "River"], imgUrl: 'https://placehold.co/400x200/5377D8/ffffff?text=Edo+Palace+Imagery', xpValue: 35 },
+                    ]
+                },
+            },
+            'Esan': {
+                color: 'text-blue-500', accent: 'bg-blue-500', icon: '🔵',
+                modules: {
+                    Listening: [
+                        { type: 'Listening', audioText: "Wo khue?", prompt: "What question was asked?", answer: "How are you?", options: ["What is your name?", "How are you?", "Where is the book?", "I am hungry."], xpValue: 40 },
+                        { type: 'Listening', audioText: "M'ode uwa.", prompt: "What is the speaker doing?", answer: "I am going home.", options: ["I am going to market.", "I am going home.", "I am eating.", "I am running."], xpValue: 40 },
+                    ],
+                    Writing: [
+                        { type: 'Writing', prompt: "Translate: 'The child is playing.'", answer: "Omo ye gbide.", options: [], xpValue: 30 },
+                        { type: 'Writing', prompt: "Translate: 'Give me water.'", answer: "Fi ame no.", options: [], xpValue: 30 },
+                    ],
+                    Pronunciation: [
+                        { type: 'Pronunciation', prompt: "Oka", answer: "Maize", options: [], xpValue: 50 },
+                        { type: 'Pronunciation', prompt: "Ede", answer: "Day", options: [], xpValue: 50 },
+                    ],
+                    Quiz: [
+                        { type: 'Quiz', prompt: "What does 'Ede' mean?", answer: "Day", options: ["Year", "Month", "Day", "Night"], xpValue: 20 },
+                    ],
+                    Image: [
+                        { type: 'Image', prompt: "Which image shows a typical 'farm crop'?", answer: "Yam", options: ["Fish", "Car", "Yam", "Beads"], imgUrl: 'https://placehold.co/400x200/944D38/ffffff?text=Esan+Yam+Farm', xpValue: 35 },
+                    ]
+                },
+            },
+            'Itsekiri': {
+                color: 'text-yellow-500', accent: 'bg-yellow-500', icon: '🟡',
+                modules: {
+                    Listening: [
+                        { type: 'Listening', audioText: "Ekuogbe.", prompt: "What common greeting was given?", answer: "Peace/Greetings", options: ["I am hungry", "Peace/Greetings", "Where is the boat", "The food is ready"], xpValue: 40 },
+                    ],
+                    Writing: [
+                        { type: 'Writing', prompt: "Translate: 'I see my friend.'", answer: "Mo ri omisan mi.", options: [], xpValue: 30 },
+                    ],
+                    Pronunciation: [
+                        { type: 'Pronunciation', prompt: "Omisan", answer: "Friend", options: [], xpValue: 50 },
+                    ],
+                    Quiz: [
+                        { type: 'Quiz', prompt: "What does 'Omo' mean in Itsekiri?", answer: "Child", options: ["Boat", "Water", "Child", "Man"], xpValue: 20 },
+                    ],
+                    Image: [
+                        { type: 'Image', prompt: "Select the image representing 'Water/River'", answer: "River", options: ["Mountain", "River", "Forest", "Road"], imgUrl: 'https://placehold.co/400x200/067098/ffffff?text=Itsekiri+Riverine+Area', xpValue: 35 },
+                    ]
+                },
+            },
+            'Auchi (Yekhee)': {
+                color: 'text-red-500', accent: 'bg-red-500', icon: '🔴',
+                modules: {
+                    Listening: [
+                        { type: 'Listening', audioText: "Da yoo. Wo khian ghen?", prompt: "What question followed the greeting?", answer: "Where are you going?", options: ["What is your name?", "Where are you going?", "Are you eating?", "It is raining."], xpValue: 40 },
+                    ],
+                    Writing: [
+                        { type: 'Writing', prompt: "Translate: 'The talent is exceptional.'", answer: "Ogboye ye ru vbi gbe.", options: [], xpValue: 30 },
+                    ],
+                    Pronunciation: [
+                        { type: 'Pronunciation', prompt: "Ogboye", answer: "Talent", options: [], xpValue: 50 },
+                    ],
+                    Quiz: [
+                        { type: 'Quiz', prompt: "What is the Yekhee word for 'Friend'?", answer: "Ose", options: ["Ose", "Ebe", "Ekho", "Ame"], xpValue: 20 },
+                    ],
+                    Image: [
+                        { type: 'Image', prompt: "Select the image representing 'Community Festival'", answer: "Masquerade", options: ["Masquerade", "Desk", "Telephone", "Book"], imgUrl: 'https://placehold.co/400x200/A05A5A/ffffff?text=Auchi+Masquerade+Event', xpValue: 35 },
+                    ]
+                },
+            },
+        };
+
+        // State Variables (Replaces Angular Signals)
+        window.db = null;
+        window.auth = null;
+        window.userId = null;
+        window.appLoading = true;
+        window.currentView = 'dashboard';
+        window.userProfile = { ...defaultProfile };
+        window.leaderboard = [];
+        window.practiceSession = { ...defaultSession };
+        window.toast = { message: '', color: '', visible: false };
+        window.isListeningAudio = false;
+        window.isPronunciationAnalyzing = false;
+        
+        // --- Utility Functions ---
+
+        const base64ToArrayBuffer = (base64) => {
+            const binaryString = window.atob(base64);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) { bytes[i] = binaryString.charCodeAt(i); }
+            return bytes.buffer;
+        };
+
+        const writeString = (view, offset, string) => {
+            for (let i = 0; i < string.length; i++) { view.setUint8(offset + i, string.charCodeAt(i)); }
+        };
+
+        const pcmToWav = (pcm16, sampleRate) => {
+            const numChannels = 1;
+            const bytesPerSample = 2; // Int16
+            const buffer = new ArrayBuffer(44 + pcm16.length * bytesPerSample);
+            const view = new DataView(buffer);
+
+            // RIFF chunk descriptor
+            writeString(view, 0, 'RIFF');
+            view.setUint32(4, 36 + pcm16.length * bytesPerSample, true);
+            writeString(view, 8, 'WAVE');
+            // FMT sub-chunk
+            writeString(view, 12, 'fmt ');
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true); // PCM format (1)
+            view.setUint16(22, numChannels, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * numChannels * bytesPerSample, true);
+            view.setUint16(32, numChannels * bytesPerSample, true);
+            view.setUint16(34, bytesPerSample * 8, true);
+            // Data sub-chunk
+            writeString(view, 36, 'data');
+            view.setUint32(40, pcm16.length * bytesPerSample, true);
+
+            // Write PCM data
+            for (let i = 0; i < pcm16.length; i++) {
+                view.setInt16(44 + i * bytesPerSample, pcm16[i], true);
+            }
+            return new Blob([buffer], { type: 'audio/wav' });
+        };
+        
+        // --- UI Update & State Change ---
+        
+        window.updateUI = (rerenderMain = true) => {
+            // Update Header (always renders)
+            document.getElementById('app-header').innerHTML = renderHeader();
+            
+            // Update Main Content
+            if (rerenderMain) {
+                const mainEl = document.getElementById('app-main');
+                if (window.appLoading) {
+                    mainEl.innerHTML = renderLoading();
+                } else if (window.userProfile.firstTime) {
+                    mainEl.innerHTML = renderIntroModal();
+                } else {
+                    switch (window.currentView) {
+                        case 'dashboard':
+                            mainEl.innerHTML = renderDashboard();
+                            break;
+                        case 'practice':
+                            mainEl.innerHTML = renderPracticeView();
+                            break;
+                        case 'settings':
+                            mainEl.innerHTML = renderSettings();
+                            break;
+                    }
+                }
+            }
+
+            // Update Toast
+            const toastEl = document.getElementById('app-toast');
+            if (window.toast.visible) {
+                if (!toastEl) {
+                    const newToast = document.createElement('div');
+                    newToast.id = 'app-toast';
+                    document.body.appendChild(newToast);
+                }
+                document.getElementById('app-toast').innerHTML = renderToast();
+            } else if (toastEl) {
+                document.body.removeChild(toastEl);
+            }
+        };
+
+        window.showToast = (color, message) => {
+            window.toast = { message, color, visible: true };
+            window.updateUI(false); // Only update toast, not main view
+            setTimeout(() => {
+                window.toast = { message: '', color: '', visible: false };
+                window.updateUI(false);
+            }, 3000);
+        };
+        
+        // --- Firebase/Auth/State Logic ---
+        
+        window.goTo = (view) => {
+            window.currentView = view;
+            if (view === 'dashboard') {
+                window.practiceSession = { ...defaultSession }; // Reset session
+            }
+            window.updateUI();
+        };
+
+        window.dismissIntro = () => {
+            window.userProfile.firstTime = false;
+            window.saveSettings(() => ({ firstTime: false }));
+            window.updateUI();
+        };
+        
+        window.initializeUserProfile = (uid) => {
+            const displayName = `Edo-Learner-${uid.substring(0, 4)}`;
+            const initialProfile = {
+                ...defaultProfile,
+                userId: uid,
+                displayName: displayName,
+            };
+            window.userProfile = initialProfile;
+            try {
+                window.firebase.setDoc(window.firebase.doc(window.db, `artifacts/${appId}/public/data/edolingo_users`, uid), initialProfile);
+                window.updateLeaderboard(displayName, initialProfile.level, initialProfile.xp);
+            } catch (error) {
+                console.error("Error initializing user profile:", error);
+            }
+        };
+        
+        window.updateLeaderboard = (displayName, level, xp) => {
+            if (!window.db || !window.userId) return;
+            try {
+                window.firebase.setDoc(window.firebase.doc(window.db, `artifacts/${appId}/public/data/edolingo_leaders`, window.userId), {
+                    userId: window.userId, displayName: displayName, level: level, xp: xp,
+                }, { merge: true });
+            } catch (error) {
+                console.error("Error updating leaderboard:", error);
+            }
+        };
+
+        window.setupFirestoreListeners = (uid) => {
+            const { doc, collection, onSnapshot, query } = window.firebase;
+            
+            const userDocRef = doc(window.db, `artifacts/${appId}/public/data/edolingo_users`, uid);
+            const leaderCollectionRef = collection(window.db, `artifacts/${appId}/public/data/edolingo_leaders`);
+
+            // 1. User Profile Listener
+            onSnapshot(userDocRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    window.userProfile = {
+                        ...defaultProfile,
+                        ...data,
+                        history: Array.isArray(data.history) ? data.history : [],
+                        displayName: data.displayName || `Edo-Learner-${uid.substring(0, 4)}`,
+                    };
+                } else {
+                    window.initializeUserProfile(uid);
+                }
+                window.updateUI();
+            }, (error) => console.error("Error listening to user profile:", error));
+
+            // 2. Leaderboard Listener
+            onSnapshot(query(leaderCollectionRef), (querySnapshot) => {
+                let leaders = [];
+                querySnapshot.forEach((doc) => leaders.push(doc.data()));
+                // Sort by Level DESC, then XP DESC
+                leaders.sort((a, b) => (b.level - a.level) || (b.xp - a.xp));
+                window.leaderboard = leaders.slice(0, 10);
+                window.updateUI(false); // Only update header/dashboard/toast
+            }, (error) => console.error("Error listening to leaderboard:", error));
+        };
+
+        window.initializeAppAndAuth = async () => {
+            if (!window.firebase) {
+                // If firebase modules haven't loaded yet, wait.
+                setTimeout(window.initializeAppAndAuth, 50);
+                return;
+            }
+
+            // FIX: setLogLevel is now correctly imported from firebase-app.js
+            const { initializeApp, setLogLevel, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } = window.firebase;
+
+            try {
+                setLogLevel('error');
+                
+                const app = initializeApp(firebaseConfig);
+                window.db = window.firebase.getFirestore(app);
+                window.auth = getAuth(app);
+
+                const unsubscribe = onAuthStateChanged(window.auth, async (user) => {
+                    if (user) {
+                        window.userId = user.uid;
+                        window.appLoading = false;
+                        window.setupFirestoreListeners(user.uid);
+                    } else {
+                        try {
+                            if (initialAuthToken) {
+                                await signInWithCustomToken(window.auth, initialAuthToken);
+                            } else {
+                                await signInAnonymously(window.auth);
+                            }
+                        } catch (error) {
+                            console.error("Authentication failed:", error);
+                            window.appLoading = false;
+                        }
+                    }
+                    unsubscribe(); // Stop listening after the initial check/sign-in
+                    window.updateUI();
+                });
+            } catch (e) {
+                console.error("Firebase Initialization Error:", e);
+                window.appLoading = false;
+                window.updateUI();
+            }
+        };
+        
+        window.startApp = () => {
+             window.initializeAppAndAuth();
+        }
+
+        // --- Practice Session Logic ---
+
+        window.startPractice = (language, module) => {
+            const moduleData = languageData[language]?.modules[module];
+
+            if (!moduleData || moduleData.length === 0) {
+                window.showToast('error', `Error: Module data missing for ${module}.`);
+                return;
+            }
+
+            // Shuffle and limit to 5 questions for a quick session
+            const questions = [...moduleData].sort(() => 0.5 - Math.random()).slice(0, 5);
+
+            window.practiceSession = {
+                ...defaultSession,
+                language,
+                module,
+                questions: questions,
+            };
+
+            window.goTo('practice');
+        };
+
+        window.handleAnswer = (userAnswer) => {
+            const session = window.practiceSession;
+            if (session.isAnswered) return;
+
+            const currentQ = session.questions[session.questionIndex];
+            const correctAnswer = currentQ.answer;
+            const finalAnswer = userAnswer.trim() || '';
+
+            // Tolerance for input: Case/whitespace insensitive
+            const isCorrect = finalAnswer.toLowerCase().replace(/\s/g, '') === correctAnswer.toLowerCase().replace(/\s/g, '');
+            const xpGain = isCorrect ? currentQ.xpValue : 5;
+
+            let feedbackText = isCorrect ? `Correct! Gained +${xpGain} XP for proficiency.` : `Review: Expected "${correctAnswer}" (+${xpGain} XP)`;
+            let feedbackColor = isCorrect ? 'text-green-500' : 'text-red-500';
+
+            window.practiceSession = {
+                ...session,
+                isAnswered: true,
+                userAnswer: finalAnswer,
+                score: isCorrect ? session.score + 1 : session.score,
+                feedback: feedbackText,
+                feedbackColor: feedbackColor,
+            };
+            
+            window.updateUI();
+
+            window.updateXpAndLevel(xpGain, isCorrect, session.language, session.module);
+
+            setTimeout(() => window.nextQuestion(), 2500);
+        };
+        
+        window.simulatePronunciation = () => {
+            const session = window.practiceSession;
+            const isAiProcessing = window.isListeningAudio || window.isPronunciationAnalyzing;
+            if (session.isAnswered || isAiProcessing) return;
+
+            window.isPronunciationAnalyzing = true;
+            window.updateUI();
+            
+            // Simulate AI analysis delay (3 seconds)
+            setTimeout(() => {
+                window.isPronunciationAnalyzing = false;
+                const score = Math.random();
+                let isCorrect;
+                let xpGain;
+
+                if (score > 0.65) {
+                    isCorrect = true;
+                    xpGain = session.questions[session.questionIndex].xpValue + 10;
+                    window.showToast('success', 'AI Report: Exceptional Tone and Clarity!');
+                } else {
+                    isCorrect = false;
+                    xpGain = 10;
+                    window.showToast('error', 'AI Report: Focus on Vowel/Tone Refinement.');
+                }
+
+                window.practiceSession = {
+                    ...session,
+                    isAnswered: true,
+                    score: isCorrect ? session.score + 1 : session.score,
+                    feedback: isCorrect ? `AI Grade: Excellent! (+${xpGain} XP)` : `AI Grade: Needs practice. (+${xpGain} XP)`,
+                    feedbackColor: isCorrect ? 'text-green-500' : 'text-red-500',
+                };
+                
+                window.updateUI();
+
+                window.updateXpAndLevel(xpGain, isCorrect, session.language, session.module);
+                setTimeout(() => window.nextQuestion(), 2500);
+            }, 3000); 
+        };
+
+        window.playTTSAudio = async () => {
+            const isAiProcessing = window.isListeningAudio || window.isPronunciationAnalyzing;
+            if (isAiProcessing) return;
+
+            const session = window.practiceSession;
+            const currentQ = session.questions[session.questionIndex];
+            const audioText = currentQ.audioText;
+
+            if (!audioText) return;
+
+            // --- FIX: Check for API Key for local execution ---
+            if (apiKey === "") {
+                window.isListeningAudio = true;
+                window.updateUI();
+                // CHANGED 'error' to 'info' to reflect that this is a successful simulation, not a breaking failure.
+                window.showToast('info', 'AI TTS Service unavailable locally (Missing API Key). Simulating success.');
+                
+                // Simulate audio playing delay
+                setTimeout(() => {
+                    window.isListeningAudio = false;
+                    window.updateUI();
+                }, 1500); 
+                return;
+            }
+            // --- END FIX ---
+
+
+            window.isListeningAudio = true;
+            window.updateUI(); // Show loading state
+
+            const payload = {
+                contents: [{ parts: [{ text: `Say clearly in a standard Nigerian accent: ${audioText}` }] }],
+                generationConfig: {
+                    responseModalities: ["AUDIO"],
+                    speechConfig: {
+                        voiceConfig: { prebuiltVoiceConfig: { voiceName: "Achird" } }
+                    }
+                },
+                model: "gemini-2.5-flash-preview-tts"
+            };
+            
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
+
+            try {
+                let response;
+                let result;
+                let maxRetries = 3;
+                let delay = 1000;
+                
+                for (let i = 0; i < maxRetries; i++) {
+                    response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (response.ok) {
+                        result = await response.json();
+                        break;
+                    }
+                    if (i < maxRetries - 1) {
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        delay *= 2;
+                    } else {
+                        throw new Error(`TTS API failed after ${maxRetries} retries.`);
+                    }
+                }
+
+                const part = result?.candidates?.[0]?.content?.parts?.[0];
+                const audioData = part?.inlineData?.data;
+                const mimeType = part?.inlineData?.mimeType;
+
+                if (audioData && mimeType && mimeType.startsWith("audio/L16")) {
+                    const sampleRateMatch = mimeType.match(/rate=(\d+)/);
+                    const sampleRate = sampleRateMatch ? parseInt(sampleRateMatch[1], 10) : 16000;
+                    
+                    const pcmData = base64ToArrayBuffer(audioData);
+                    const pcm16 = new Int16Array(pcmData);
+                    const wavBlob = pcmToWav(pcm16, sampleRate);
+                    
+                    const audio = new Audio(URL.createObjectURL(wavBlob));
+                    audio.play();
+                } else {
+                    window.showToast('error', "AI Audio generation failed: Invalid data received.");
+                }
+            } catch (error) {
+                console.error("Error generating TTS audio:", error);
+                window.showToast('error', "AI Audio service unavailable or blocked.");
+            } finally {
+                window.isListeningAudio = false;
+                window.updateUI();
+            }
+        };
+
+        window.nextQuestion = () => {
+            const session = window.practiceSession;
+            if (session.questionIndex + 1 < session.questions.length) {
+                window.practiceSession = {
+                    ...session,
+                    questionIndex: session.questionIndex + 1,
+                    isAnswered: false,
+                    userAnswer: '',
+                    feedback: '',
+                    feedbackColor: 'text-gray-400'
+                };
+            }
+            window.updateUI();
+        };
+
+        window.updateXpAndLevel = async (xpGain, isCorrect, language, mode) => {
+            if (!window.db || !window.userId) return;
+
+            const userRef = window.firebase.doc(window.db, `artifacts/${appId}/public/data/edolingo_users`, window.userId);
+
+            try {
+                await window.firebase.runTransaction(window.db, async (transaction) => {
+                    const userDoc = await transaction.get(userRef);
+                    if (!userDoc.exists()) return;
+
+                    let profile = userDoc.data();
+                    let newXp = profile.xp || 0;
+                    let newLevel = profile.level || 1;
+                    let nextLevelXp = profile.nextLevelXp || 100;
+                    
+                    newXp += xpGain;
+
+                    let leveledUp = false;
+                    while (newXp >= nextLevelXp) {
+                        newXp -= nextLevelXp;
+                        newLevel += 1;
+                        nextLevelXp = Math.floor(nextLevelXp * 1.5); // Scaled progression
+                        leveledUp = true;
+                    }
+                    
+                    if (leveledUp) {
+                        window.showToast('success', `Level UP! Reached Proficiency Level ${newLevel}!`);
+                    }
+
+                    const newHistory = profile.history || [];
+                    newHistory.push({
+                        time: Date.now(),
+                        language: language,
+                        mode: mode,
+                        xp: xpGain,
+                        result: isCorrect ? 'Pass' : 'Review',
+                    });
+                    
+                    transaction.update(userRef, {
+                        xp: newXp,
+                        level: newLevel,
+                        nextLevelXp: nextLevelXp,
+                        history: newHistory.slice(-15), // Keep only last 15 entries
+                    });
+
+                    window.updateLeaderboard(profile.displayName, newLevel, newXp);
+                });
+            } catch (e) {
+                console.error("XP/Level Transaction failed: ", e);
+                window.showToast('error', 'Failed to save progress.');
+            }
+        };
+        
+        // --- Settings and Persistence ---
+
+        window.saveSettings = (updateFn) => {
+            if (!window.db || !window.userId) {
+                window.showToast('error', 'Authentication error. Cannot save settings.');
+                return;
+            }
+            
+            const currentProfile = window.userProfile;
+            const updates = updateFn(currentProfile);
+
+            try {
+                 window.firebase.setDoc(window.firebase.doc(window.db, `artifacts/${appId}/public/data/edolingo_users`, window.userId), updates, { merge: true });
+
+                if (updates.displayName !== undefined || updates.level !== undefined || updates.xp !== undefined) {
+                    window.updateLeaderboard(updates.displayName || currentProfile.displayName, updates.level || currentProfile.level, updates.xp || currentProfile.xp);
+                }
+            } catch (error) {
+                console.error("Failed to save settings:", error);
+                window.showToast('error', "Failed to save settings.");
+            }
+        };
+
+        window.handleSettingsUpdate = (newLanguage, newDisplayName) => {
+            const finalDisplayName = newDisplayName.trim();
+            const profile = window.userProfile;
+
+            window.saveSettings(() => ({
+                currentLanguage: newLanguage,
+                displayName: finalDisplayName,
+                firstTime: false
+            }));
+
+            if (profile.displayName !== finalDisplayName) {
+                window.showToast('success', `Profile updated: Display name set to ${finalDisplayName}.`);
+            } else {
+                window.showToast('success', `Focus language set to ${newLanguage}.`);
+            }
+            window.goTo('dashboard');
+        };
+
+        // --- Template Rendering Functions ---
+        
+        const renderToast = () => {
+             const t = window.toast;
+             // Define background color based on the 'color' property
+             const bgColor = t.color === 'success' 
+                ? 'background-color: #10B981;' 
+                : (t.color === 'info' ? 'background-color: var(--color-secondary);' : 'background-color: #EF4444;');
+             
+             return `
+                <div 
+                    class="fixed top-4 left-1/2 transform -translate-x-1/2 p-4 px-6 rounded-full text-white shadow-xl transition-all duration-300 z-50 flex items-center"
+                    style="opacity: ${t.visible ? '1' : '0'}; ${bgColor}"
+                >
+                    <span class="ml-2 font-semibold">${t.message}</span>
+                </div>
+            `;
+        }
+
+        const renderLoading = () => `
+            <div class="text-center p-20">
+                <div class="loader text-[#3A5AFE] mx-auto animate-spin"></div>
+                <p class="mt-6 text-xl text-gray-400 animate-pulse">Establishing Secure Connection to Firebase...</p>
+                <p class="text-sm text-gray-500 mt-4">If loading persists, ensure your internet connection is stable.</p>
+            </div>
+        `;
+
+        const renderHeader = () => {
+            const profile = window.userProfile;
+            const rankIndex = window.leaderboard.findIndex(user => user.userId === window.userId);
+            const userRank = rankIndex >= 0 ? `#${rankIndex + 1}` : 'N/A';
+
+            return `
+                <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
+                    <h1 onclick="goTo('dashboard')" class="text-4xl font-extrabold text-[#FFC72C] cursor-pointer tracking-wider flex items-center transition duration-300 hover:scale-[1.03]">
+                        EDO<span class="text-[#3A5AFE]">LINGO</span>
+                    </h1>
+                    <nav class="flex items-center space-x-6">
+                        <div class="text-right hidden sm:block">
+                            <p class="text-sm font-semibold text-gray-300 text-ellipsis max-w-[150px]">${profile.displayName}</p>
+                            <p class="text-xs text-gray-400">Level ${profile.level} | Rank: <span class="text-yellow-400">${userRank}</span></p>
+                        </div>
+                        <button 
+                            onclick="goTo('settings')" 
+                            class="p-3 rounded-full bg-[#182035] text-gray-300 hover:bg-gray-700 transition duration-150 shadow-inner"
+                            title="Settings"
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-6 h-6"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.44a2 2 0 0 1-2 2h-.44a2 2 0 0 0-2 2v.44a2 2 0 0 1-2 2v.44a2 2 0 0 0 2 2h.44a2 2 0 0 1 2 2v.44a2 2 0 0 0 2 2h.44a2 2 0 0 1 2 2v.44a2 2 0 0 0 2 2h.44a2 2 0 0 1 2-2v-.44a2 2 0 0 0 2-2v-.44a2 2 0 0 1 2-2v-.44a2 2 0 0 0 2-2v-.44a2 2 0 0 1 2-2v.44a2 2 0 0 0 2 2h.44a2 2 0 0 1 2 2v.44a2 2 0 0 0 2 2h.44a2 2 0 0 1 2 2v-.44a2 2 0 0 0 2-2v-.44a2 2 0 0 1-2-2v-.44a2 2 0 0 0-2-2h-.44a2 2 0 0 1-2-2v-.44a2 2 0 0 0-2-2h-.44a2 2 0 0 1-2-2V2h-.44z"/><circle cx="12" cy="12" r="3"/></svg>
+                        </button>
+                    </nav>
+                </div>
+            `;
+        }
+
+        const renderIntroModal = () => `
+            <div 
+                class="fixed inset-0 bg-black bg-opacity-80 z-40 flex items-center justify-center p-4 transition-opacity duration-500"
+            >
+                <div class="bg-white text-gray-900 rounded-3xl p-8 max-w-xl w-full shadow-2xl transform scale-100 transition-transform duration-500">
+                    <h2 class="text-4xl font-extrabold text-[#3A5AFE] mb-3 border-b pb-2">Welcome to EDOLINGO</h2>
+                    <p class="text-lg mb-6">
+                        This platform is designed to showcase proficiency and dedication to preserving the **Edo State languages** (Benin, Esan, Itsekiri, Auchi).
+                    </p>
+                    <div class="space-y-4 mb-8 text-sm">
+                        <div class="flex items-start">
+                            <span class="text-xl text-yellow-500 mr-3">★</span>
+                            <p>Your performance across **Listening (AI TTS)**, **Pronunciation (AI/ML Simulation)**, **Writing**, and **Quiz** modules is tracked and contributes to your **Global Proficiency Score** (Level & Rank).</p>
+                        </div>
+                        <div class="flex items-start">
+                            <span class="text-xl text-green-500 mr-3">🚀</span>
+                            <p>This application utilizes real-time database synchronization via **Firebase Firestore** to manage your profile, history, and the Global Leaderboard.</p>
+                        </div>
+                    </div>
+                    <button 
+                        onclick="dismissIntro()" 
+                        class="w-full py-3 bg-[#FFC72C] text-[#0A0E1A] font-bold rounded-xl text-lg transition duration-200 hover:bg-yellow-400 shadow-lg shadow-yellow-500/50"
+                    >
+                        Start Assessment Journey
+                    </button>
+                </div>
+            </div>
+        `;
+
+        const renderDashboard = () => {
+            const profile = window.userProfile;
+            const currentLang = languageData[profile.currentLanguage];
+            const currentLangColor = currentLang?.color || 'text-gray-500';
+            const xpPercentage = profile.nextLevelXp > 0 ? Math.min(100, (profile.xp / profile.nextLevelXp) * 100) : 0;
+            const currentUserId = window.userId;
+
+            const leaderboardHtml = window.leaderboard.length === 0 ? '<li class="text-gray-500 text-center py-4">No ranked users yet.</li>' : window.leaderboard.map((user, index) => {
+                const isCurrentUser = user.userId === currentUserId;
+                return `
+                    <li class="flex justify-between items-center p-3 rounded-xl text-sm transition-all duration-300 transform ${isCurrentUser ? 'bg-[#3A5AFE] bg-opacity-10 border border-[#3A5AFE] font-semibold text-white animate-rank-pulse' : 'bg-[#182035] border border-gray-700 text-gray-300'}">
+                        <span class="font-bold w-6 text-yellow-400">${index + 1}.</span>
+                        <span class="flex-1 overflow-hidden text-ellipsis px-2">${user.displayName}</span>
+                        <span class="text-right font-medium">L${user.level} (${user.xp} XP)</span>
+                    </li>
+                `;
+            }).join('');
+
+            const historyHtml = profile.history.slice().reverse().map((item) => `
+                <li class="flex flex-col py-2 text-xs transition-colors duration-200 hover:bg-[#182035] rounded-md px-1">
+                    <div class="flex justify-between items-center">
+                        <span class="font-medium flex items-center text-gray-300">
+                            ${item.language} - ${item.mode}
+                        </span>
+                        <span class="font-bold ${item.result === 'Pass' ? 'text-green-400' : 'text-red-400'}">${item.result}</span>
+                    </div>
+                    <div class="flex justify-between text-gray-500 mt-1">
+                        <span>+${item.xp} XP</span>
+                        <span class="italic">${new Date(item.time).toLocaleDateString()}</span>
+                    </div>
+                </li>
+            `).join('');
+
+            const modulesHtml = Object.keys(currentLang?.modules || {}).map(module => {
+                const icon = module === 'Listening' ? '🎧' : module === 'Writing' ? '✍️' : module === 'Pronunciation' ? '🗣️' : module === 'Quiz' ? '❓' : '🖼️';
+                const description = module === 'Listening' ? 'AI Voice Recognition' : module === 'Pronunciation' ? 'AI Tone Analysis' : module === 'Writing' ? 'Translation Skill' : 'Core Vocabulary';
+                return `
+                    <button 
+                        onclick="startPractice('${profile.currentLanguage}', '${module}')" 
+                        class="gpa-card-inner flex flex-col items-center p-6 text-center hover:bg-yellow-900/20 group transition-all duration-300"
+                    >
+                        <span class="text-4xl mb-3 text-[#FFC72C]">${icon}</span>
+                        <h4 class="text-xl font-bold text-gray-100 group-hover:text-[#FFC72C] transition-colors">${module}</h4>
+                        <p class="text-xs text-gray-400 mt-1">${description}</p>
+                    </button>
+                `;
+            }).join('');
+
+            return `
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                    <!-- Main Status and Modules -->
+                    <div class="lg:col-span-2 space-y-8">
+                        <!-- Profile Card -->
+                        <div class="gpa-card flex flex-col md:flex-row items-center justify-between p-8 border-l-8 border-[#3A5AFE]">
+                            <div class="space-y-2 text-center md:text-left">
+                                <h2 class="text-4xl font-extrabold text-[#FFC72C]">${profile.displayName}</h2>
+                                <p class="text-lg text-gray-400">
+                                    Focusing on: <span class="font-bold ${currentLangColor}">${profile.currentLanguage} ${currentLang?.icon}</span>
+                                </p>
+                                <p class="text-sm text-gray-500">User ID: <span class="font-mono text-xs">${window.userId?.substring(0, 15)}...</span></p>
+                            </div>
+                            <div class="mt-4 md:mt-0 p-4 bg-[#3A5AFE] rounded-full text-white font-extrabold text-3xl shadow-lg transform hover:rotate-3 transition duration-300">
+                                L${profile.level}
+                            </div>
+                        </div>
+
+                        <!-- XP Progress Bar -->
+                        <div class="gpa-card">
+                            <div class="flex justify-between items-center mb-2">
+                                <h3 class="text-xl font-bold text-gray-200">Proficiency Track (Lvl ${profile.level + 1})</h3>
+                                <span class="text-sm font-semibold text-gray-400">${profile.xp} / ${profile.nextLevelXp} XP</span>
+                            </div>
+                            <div class="w-full bg-[#182035] rounded-full h-4 shadow-inner">
+                                <div 
+                                    class="h-4 rounded-full bg-gradient-to-r from-[#FFC72C] to-[#3A5AFE] transition-all duration-700 ease-out shadow-lg" 
+                                    style="width: ${xpPercentage}%"
+                                ></div>
+                            </div>
+                        </div>
+
+                        <!-- Language Modules -->
+                        <h3 class="text-2xl font-bold text-gray-200 pt-4 border-t border-gray-700">Assessment Modules</h3>
+                        <div class="grid grid-cols-2 lg:grid-cols-3 gap-6">
+                            ${modulesHtml}
+                        </div>
+                    </div>
+
+                    <!-- Leaderboard and History Column -->
+                    <div class="lg:col-span-1 space-y-8">
+                        
+                        <!-- Leaderboard (Friend Rank) -->
+                        <div class="gpa-card">
+                            <h3 class="text-xl font-bold text-gray-200 mb-4 flex items-center space-x-2">
+                                <span class="text-[#FFC72C] text-2xl">🏆</span>
+                                <span>Global Proficiency Leaderboard</span>
+                            </h3>
+                            <ul class="space-y-2">
+                                ${leaderboardHtml}
+                            </ul>
+                        </div>
+
+                        <!-- Learning History -->
+                        <div class="gpa-card">
+                            <h3 class="text-xl font-bold text-gray-200 mb-4">Recent Learning History</h3>
+                            <div class="max-h-64 overflow-y-auto pr-2">
+                                <ul class="divide-y divide-gray-700">
+                                    ${historyHtml}
+                                    ${profile.history.length === 0 ? '<li class="py-4 text-sm text-gray-500 text-center">No completed assessments yet.</li>' : ''}
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        };
+
+        const renderQuestionComponent = (session, question) => {
+            const isDisabled = session.isAnswered ? 'disabled' : '';
+            
+            switch (question.type) {
+                case 'Quiz':
+                case 'Listening':
+                    const promptText = question.type === 'Listening' ? 'Select the correct translation of the audio:' : 'Select the correct meaning:';
+                    
+                    const optionsHtml = question.options?.map(option => {
+                        const isCorrect = option === question.answer;
+                        const isUserAnswer = session.isAnswered && option === session.userAnswer;
+                        const bgColor = session.isAnswered ? (isCorrect ? 'bg-green-900/50 border-green-500 text-green-400' : (isUserAnswer && session.feedbackColor === 'text-red-500' ? 'bg-red-900/50 border-red-500 text-red-400' : 'opacity-50 cursor-default bg-[#182035] border-gray-700 text-gray-200')) : 'bg-[#182035] border-gray-700 text-gray-200 hover:bg-gray-700';
+
+                        return `
+                            <button 
+                                onclick="handleAnswer('${option.replace(/'/g, "\\'")}')" 
+                                ${isDisabled}
+                                class="w-full text-left p-4 rounded-xl border-2 font-medium transition duration-150 transform hover:scale-[1.01] ${bgColor}"
+                            >
+                                ${option}
+                            </button>
+                        `;
+                    }).join('');
+
+                    return `
+                        <h3 class="text-xl font-bold mb-4 text-gray-400">Task: ${promptText}</h3>
+                        
+                        ${question.type === 'Listening' ? `
+                            <p class="text-sm italic text-yellow-500 mb-2">Listen to the AI generated phrase (Simulated if run locally):</p>
+                            <button 
+                                onclick="playTTSAudio()" 
+                                class="edo-btn bg-[#3A5AFE] text-white hover:bg-blue-600 shadow-blue-500/50 mb-6 flex items-center justify-center space-x-3 w-full max-w-sm mx-auto"
+                                ${window.isListeningAudio ? 'disabled' : ''}
+                            >
+                                <span class="text-2xl">🔊</span>
+                                <span>${window.isListeningAudio ? 'Generating Audio...' : 'Play Audio (AI TTS)'}</span>
+                            </button>
+                        ` : `
+                            <p class="text-4xl font-extrabold mb-8 text-[#FFC72C] text-center">${question.prompt}</p>
+                        `}
+
+                        <div class="space-y-3">
+                            ${optionsHtml}
+                        </div>
+                    `;
+                case 'Writing':
+                    return `
+                        <h3 class="text-xl font-bold mb-4 text-gray-400">Task: Translate the following phrase:</h3>
+                        <p class="text-4xl font-extrabold mb-6 text-[#3A5AFE] text-center">"${question.prompt}"</p>
+                        <input 
+                            type="text" 
+                            id="writingInput"
+                            onkeyup="if (event.key === 'Enter') handleAnswer(this.value)"
+                            placeholder="Enter your translation here..."
+                            class="w-full p-4 border-2 border-gray-700 bg-[#0A0E1A] rounded-xl text-lg text-gray-100 focus:border-[#FFC72C] focus:ring-4 focus:ring-yellow-900/50 transition duration-150"
+                            ${isDisabled}
+                        />
+                        <button 
+                            onclick="handleAnswer(document.getElementById('writingInput').value)" 
+                            ${isDisabled}
+                            class="edo-btn primary-btn w-full mt-6"
+                        >
+                            Submit Translation
+                        </button>
+                    `;
+                case 'Pronunciation':
+                    return `
+                        <h3 class="text-xl font-bold mb-4 text-gray-400">Task: Pronounce this word for AI analysis:</h3>
+                        <div class="text-center p-6 bg-[#182035] border border-gray-700 rounded-xl max-w-sm mx-auto mb-6 shadow-inner">
+                            <p class="text-6xl font-extrabold text-[#FFC72C]">${question.prompt}</p>
+                            <p class="text-sm italic text-gray-500 mt-2">Meaning: ${question.answer}</p>
+                        </div>
+                        <button 
+                            onclick="simulatePronunciation()" 
+                            ${isDisabled || window.isAiProcessing}
+                            class="edo-btn bg-green-600 text-white hover:bg-green-700 shadow-green-500/50 w-full flex items-center justify-center space-x-3"
+                        >
+                            <span class="text-2xl">🎤</span>
+                            <span>${window.isPronunciationAnalyzing ? 'AI Listening...' : 'Record & Analyze Pronunciation (AI Sim)'}</span>
+                        </button>
+                    `;
+                case 'Image':
+                    const imageOptionsHtml = question.options?.map(option => {
+                        const isCorrect = option === question.answer;
+                        const isUserAnswer = session.isAnswered && option === session.userAnswer;
+                        const bgColor = session.isAnswered ? (isCorrect ? 'bg-green-900/50 border-green-500 text-green-400' : (isUserAnswer && session.feedbackColor === 'text-red-500' ? 'bg-red-900/50 border-red-500 text-red-400' : 'opacity-50 cursor-default bg-[#182035] border-gray-700 text-gray-200')) : 'bg-[#182035] border-gray-700 text-gray-200 hover:bg-gray-700';
+
+                        return `
+                            <button 
+                                onclick="handleAnswer('${option.replace(/'/g, "\\'")}')" 
+                                ${isDisabled}
+                                class="w-full p-3 rounded-xl border-2 font-medium transition duration-150 transform hover:scale-[1.01] text-center ${bgColor}"
+                            >
+                                ${option}
+                            </button>
+                        `;
+                    }).join('');
+
+                    return `
+                        <h3 class="text-xl font-bold mb-4 text-gray-400">Task: ${question.prompt}</h3>
+                        
+                        <div class="flex justify-center mb-6">
+                            <img src="${question.imgUrl}" onerror="this.onerror=null;this.src='https://placehold.co/400x200/374151/ffffff?text=Image+Placeholder'" alt="Assessment Image" class="rounded-xl border-4 border-gray-700 shadow-xl w-full max-w-md h-auto transition-transform duration-300 hover:scale-[1.03]"/>
+                        </div>
+                        
+                        <div class="grid grid-cols-2 gap-3">
+                            ${imageOptionsHtml}
+                        </div>
+                    `;
+                default:
+                    return `<p class="text-red-500">Error: Assessment module not configured.</p>`;
+            }
+        }
+        
+        const renderPracticeView = () => {
+            const session = window.practiceSession;
+            const currentQ = session.questions[session.questionIndex];
+            const total = session.questions.length;
+            const isSessionFinished = session.questions.length > 0 && session.questionIndex >= session.questions.length;
+
+            const currentModuleAccent = session.module === 'Listening' ? 'border-yellow-500' : session.module === 'Pronunciation' ? 'border-green-500' : session.module === 'Writing' ? 'border-blue-500' : session.module === 'Image' ? 'border-red-500' : 'border-gray-500';
+
+            // Final Score View
+            if (isSessionFinished) {
+                const percent = Math.round((session.score / total) * 100);
+                return `
+                    <div class="max-w-xl mx-auto gpa-card text-center p-8 border-l-8 ${currentModuleAccent}">
+                        <h2 class="text-4xl font-extrabold text-[#FFC72C] mb-4">
+                            Module Complete!
+                        </h2>
+                        <p class="text-xl text-gray-300 mb-6">
+                            ${session.language} - ${session.module} Assessment
+                        </p>
+                        <div class="text-7xl font-extrabold mb-8 ${percent >= 70 ? 'text-green-500' : 'text-red-500'} bg-[#182035] p-6 rounded-xl shadow-inner border border-gray-700">
+                            ${session.score} / ${total}
+                        </div>
+                        <p class="text-2xl font-semibold mb-8 text-gray-200">
+                            Final Score: ${percent}%
+                        </p>
+                        <button onclick="goTo('dashboard')" class="edo-btn primary-btn">
+                            Return to Dashboard
+                        </button>
+                    </div>
+                `;
+            }
+            
+            // Question View
+            return `
+                <div class="max-w-3xl mx-auto">
+                    <div class="flex justify-between items-center mb-6">
+                        <h2 class="text-3xl font-bold text-gray-100">
+                            ${session.module} | <span class="text-[#3A5AFE]">${session.language}</span>
+                        </h2>
+                        <p class="text-xl font-semibold text-[#FFC72C] bg-[#182035] px-3 py-1 rounded-full shadow-inner">
+                            Q ${session.questionIndex + 1} of ${total}
+                        </p>
+                    </div>
+
+                    <div class="gpa-card border-t-4 ${currentModuleAccent}">
+                        ${renderQuestionComponent(session, currentQ)}
+                    </div>
+
+                    <!-- Feedback Area -->
+                    <div class="mt-6 p-4 rounded-xl font-semibold text-center transition-all duration-300
+                        ${!session.isAnswered ? 'bg-[#182035] border border-gray-700' : session.feedbackColor === 'text-green-500' ? 'bg-green-900/30 border border-green-500' : 'bg-red-900/30 border border-red-500'}"
+                    >
+                        <p class="text-lg ${session.feedbackColor}">
+                            ${session.feedback || 'Answer the question above to continue.'}
+                        </p>
+                    </div>
+
+                    <!-- Footer button for ending session -->
+                    <div class="mt-8 text-center">
+                        <button onclick="goTo('dashboard')" class="secondary-btn text-xs py-2 px-4 rounded-lg">
+                            Exit Assessment
+                        </button>
+                    </div>
+                </div>
+            `;
+        };
+        
+        const renderSettings = () => {
+            const profile = window.userProfile;
+            const currentLangColor = languageData[profile.currentLanguage]?.color || 'text-gray-500';
+            
+            // Helper to get input value within the template structure
+            const getInputValue = `document.getElementById('displayNameInput').value`;
+            
+            const languageOptionsHtml = Object.keys(languageData).map(lang => {
+                const isCurrent = lang === profile.currentLanguage;
+                const className = isCurrent 
+                    ? 'border-[#FFC72C] bg-yellow-900/20 text-[#FFC72C] shadow-lg shadow-yellow-500/20' 
+                    : 'border-gray-700 bg-[#182035] text-gray-300 hover:border-[#3A5AFE]';
+                
+                return `
+                    <button 
+                        onclick="handleSettingsUpdate('${lang}', ${getInputValue})" 
+                        class="p-4 rounded-xl text-lg font-bold transition duration-150 border-2 flex flex-col items-center justify-center space-y-1 transform hover:scale-[1.02] ${className}"
+                    >
+                        <span class="text-3xl">${languageData[lang].icon}</span>
+                        <span>${lang}</span>
+                        ${isCurrent ? '<span class="text-xs text-green-400 font-normal">Active Focus</span>' : ''}
+                    </button>
+                `;
+            }).join('');
+
+            return `
+                <div class="max-w-3xl mx-auto gpa-card p-8">
+                    <h2 class="text-3xl font-bold text-gray-100 mb-6 border-b border-gray-700 pb-3">
+                        <span class="text-[#FFC72C]">Profile</span> & <span class="text-[#3A5AFE]">Language Settings</span>
+                    </h2>
+                    
+                    <div class="space-y-8">
+                        <!-- Display Name -->
+                        <div class="gpa-card-inner">
+                            <p class="font-semibold text-gray-300 mb-2">Display Name:</p>
+                            <input 
+                                type="text" 
+                                id="displayNameInput"
+                                onkeyup="if (event.key === 'Enter') handleSettingsUpdate(profile.currentLanguage, this.value)"
+                                value="${profile.displayName}"
+                                placeholder="Enter new display name"
+                                class="w-full p-3 border-2 border-gray-700 bg-[#0A0E1A] rounded-lg text-lg text-gray-100 focus:border-[#FFC72C] transition"
+                            />
+                            <p class="text-xs text-gray-500 mt-2">This name appears on the Global Leaderboard.</p>
+                        </div>
+
+                        <!-- Language Selection -->
+                        <div>
+                            <h3 class="text-xl font-semibold border-b border-gray-700 pb-2 text-gray-300 mb-4">
+                                Primary Language Focus <span class="${currentLangColor}">(${profile.currentLanguage})</span>
+                            </h3>
+                            
+                            <div class="grid grid-cols-2 gap-4">
+                                ${languageOptionsHtml}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mt-8">
+                        <button onclick="goTo('dashboard')" class="edo-btn secondary-btn w-full">
+                            Return to Dashboard
+                        </button>
+                    </div>
+                </div>
+            `;
+        }
+
+        // --- Initial Call (Wait for firebase imports to complete) ---
+        // If the firebase object is ready, start the app immediately. Otherwise, the script tag above will call startApp.
+        if (window.firebase) {
+            window.startApp();
+        }
+    </script>
+</body>
+</html>
