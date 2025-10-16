@@ -1,0 +1,941 @@
+import React, { useState, useEffect, useCallback } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, setDoc, onSnapshot, collection, query } from 'firebase/firestore';
+import { Loader2, Zap, Trophy, User, Home, CheckCircle, XCircle, MessageSquare, Volume2, Send } from 'lucide-react';
+
+// --- Configuration and Constants ---
+const availableLanguages = [
+    { name: 'Edo', color: 'text-green-400', theme: 'border-green-700/50 bg-green-900/10 hover:border-green-400' },
+    { name: 'Esan', color: 'text-blue-400', theme: 'border-blue-700/50 bg-blue-900/10 hover:border-blue-400' },
+    { name: 'Owan', color: 'text-yellow-400', theme: 'border-yellow-700/50 bg-yellow-900/10 hover:border-yellow-400' },
+    { name: 'Ishan', color: 'text-red-400', theme: 'border-red-700/50 bg-red-900/10 hover:border-red-400' },
+    { name: 'Akoko-Edo', color: 'text-indigo-400', theme: 'border-indigo-700/50 bg-indigo-900/10 hover:border-indigo-400' }
+];
+
+const commonWords = ['home', 'water', 'food', 'hello', 'thank you', 'love', 'child', 'father', 'market', 'money', 'come', 'go', 'good', 'dog', 'how are you', 'what is your name'];
+const API_KEY = "";
+const TEXT_GEN_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${API_KEY}`;
+const TTS_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${API_KEY}`;
+const APP_ID = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+// --- Global Firebase Instances (Set in App component useEffect) ---
+let dbInstance = null;
+let authInstance = null;
+
+// --- TTS Utility Functions (Convert PCM Audio to Playable WAV) ---
+
+// Helper function to convert Base64 string to ArrayBuffer
+const base64ToArrayBuffer = (base64) => {
+    const binaryString = atob(base64);
+    const len = binaryString.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes.buffer;
+};
+
+// Helper for writing string to DataView
+const writeString = (view, offset, string) => {
+    for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+    }
+};
+
+// Function to convert 16-bit signed PCM data to a WAV Blob
+const pcmToWav = (pcm16, sampleRate) => {
+    const numChannels = 1;
+    const bitDepth = 16;
+    const pcmDataLength = pcm16.length * 2; // 2 bytes per sample (16-bit)
+    const buffer = new ArrayBuffer(44 + pcmDataLength);
+    const view = new DataView(buffer);
+    let offset = 0;
+
+    // RIFF identifier 'RIFF'
+    writeString(view, offset, 'RIFF'); offset += 4;
+    // file size (byte length of data + 36)
+    view.setUint32(offset, 36 + pcmDataLength, true); offset += 4;
+    // file format 'WAVE'
+    writeString(view, offset, 'WAVE'); offset += 4;
+    // format sub-chunk identifier 'fmt '
+    writeString(view, offset, 'fmt '); offset += 4;
+    // format sub-chunk size (16 for PCM)
+    view.setUint32(offset, 16, true); offset += 4;
+    // audio format (1 for PCM)
+    view.setUint16(offset, 1, true); offset += 2;
+    // number of channels
+    view.setUint16(offset, numChannels, true); offset += 2;
+    // sample rate
+    view.setUint32(offset, sampleRate, true); offset += 4;
+    // byte rate (SampleRate * NumChannels * BitDepth/8)
+    view.setUint32(offset, sampleRate * numChannels * (bitDepth / 8), true); offset += 4;
+    // block align (NumChannels * BitDepth/8)
+    view.setUint16(offset, numChannels * (bitDepth / 8), true); offset += 2;
+    // bits per sample
+    view.setUint16(offset, bitDepth, true); offset += 2;
+    // data sub-chunk identifier 'data'
+    writeString(view, offset, 'data'); offset += 4;
+    // data sub-chunk size (byte length of data)
+    view.setUint32(offset, pcmDataLength, true); offset += 4;
+
+    // Write PCM data
+    for (let i = 0; i < pcm16.length; i++) {
+        view.setInt16(offset, pcm16[i], true);
+        offset += 2;
+    }
+
+    return new Blob([buffer], { type: 'audio/wav' });
+};
+
+
+// --- Utility Components ---
+
+const LoadingState = ({ message }) => (
+    <div className="flex flex-col items-center justify-center h-full text-center py-20">
+        <Loader2 className="h-10 w-10 text-yellow-400 mb-4 animate-spin" />
+        <p className="text-xl text-gray-300 font-semibold">{message}</p>
+    </div>
+);
+
+const EdoButton = ({ onClick, children, primary = true, disabled = false, className = '' }) => {
+    const baseClasses = 'edo-btn py-3 px-6 rounded-xl font-extrabold transition-all duration-200 transform active:scale-95 shadow-lg w-full';
+    const colorClasses = primary
+        ? 'bg-yellow-400 text-gray-900 hover:bg-yellow-300 disabled:bg-gray-700 disabled:text-gray-500'
+        : 'bg-gray-800 text-yellow-400 border-2 border-yellow-400 hover:bg-yellow-400 hover:text-gray-900 disabled:opacity-50';
+
+    return (
+        <button
+            onClick={onClick}
+            disabled={disabled}
+            className={`${baseClasses} ${colorClasses} ${className}`}
+        >
+            {children}
+        </button>
+    );
+};
+
+// --- Firebase Data Hook (Unchanged) ---
+const useFirebaseData = () => {
+    const [userId, setUserId] = useState(null);
+    const [profileData, setProfileData] = useState({ name: 'New Learner', currentLanguage: 'Edo' });
+    const [progressData, setProgressData] = useState({ score: 0, lessonsCompleted: 0, quizHistory: [] });
+    const [leaderboardData, setLeaderboardData] = useState([]);
+    const [isAuthReady, setIsAuthReady] = useState(false);
+
+    const getProfileDocRef = useCallback((uid) => doc(dbInstance, `artifacts/${APP_ID}/users/${uid}/profile`, 'userData'), []);
+    const getProgressDocRef = useCallback((uid) => doc(dbInstance, `artifacts/${APP_ID}/users/${uid}/progress`, 'lingoProgress'), []);
+    const getLeaderboardCollectionRef = useCallback(() => collection(dbInstance, `artifacts/${APP_ID}/public/data/leaderboard`), []);
+
+    useEffect(() => {
+        const initializeFirebase = async () => {
+            try {
+                const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+                if (!firebaseConfig) return;
+
+                const app = initializeApp(firebaseConfig);
+                dbInstance = getFirestore(app);
+                authInstance = getAuth(app);
+
+                const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+                if (initialAuthToken) {
+                    await signInWithCustomToken(authInstance, initialAuthToken);
+                } else {
+                    await signInAnonymously(authInstance);
+                }
+
+                onAuthStateChanged(authInstance, (user) => {
+                    if (user) {
+                        setUserId(user.uid);
+                    } else {
+                        setUserId(crypto.randomUUID());
+                    }
+                    setIsAuthReady(true);
+                });
+            } catch (error) {
+                console.error("Firebase Initialization Error:", error);
+                setIsAuthReady(true);
+            }
+        };
+        initializeFirebase();
+    }, []);
+
+    useEffect(() => {
+        if (!isAuthReady || !userId) return;
+
+        const unsubProfile = onSnapshot(getProfileDocRef(userId), (docSnapshot) => {
+            if (docSnapshot.exists()) {
+                setProfileData(docSnapshot.data());
+            }
+        }, (error) => console.error("Profile Snapshot Error:", error));
+
+        const unsubProgress = onSnapshot(getProgressDocRef(userId), (docSnapshot) => {
+            if (docSnapshot.exists()) {
+                setProgressData(docSnapshot.data());
+            }
+        }, (error) => console.error("Progress Snapshot Error:", error));
+
+        const unsubLeaderboard = onSnapshot(query(getLeaderboardCollectionRef()), (querySnapshot) => {
+            const data = [];
+            querySnapshot.forEach((doc) => data.push({ id: doc.id, ...doc.data() }));
+            data.sort((a, b) => b.score - a.score);
+            setLeaderboardData(data);
+        }, (error) => console.error("Leaderboard Snapshot Error:", error));
+
+        return () => {
+            unsubProfile();
+            unsubProgress();
+            unsubLeaderboard();
+        };
+    }, [isAuthReady, userId, getProfileDocRef, getProgressDocRef, getLeaderboardCollectionRef]);
+
+    const updateLeaderboard = useCallback(async (score, name, lang) => {
+        if (!userId || !dbInstance) return;
+        try {
+            const leaderboardDocRef = doc(getLeaderboardCollectionRef(), userId);
+            await setDoc(leaderboardDocRef, {
+                name: name,
+                score: score,
+                lastUpdated: new Date().toISOString(),
+                currentLanguage: lang
+            }, { merge: true });
+        } catch (error) {
+            console.error("Error updating leaderboard:", error);
+        }
+    }, [userId, getLeaderboardCollectionRef]);
+
+    return { userId, isAuthReady, profileData, progressData, leaderboardData, updateLeaderboard, getProfileDocRef, getProgressDocRef };
+};
+
+
+// --- Pages (ProfileSetupPage, DashboardPage, LeaderboardPage are mostly unchanged) ---
+
+const ProfileSetupPage = ({ profileData, userId, isSetup, goTo, updateLeaderboard, getProfileDocRef }) => {
+    // ... (ProfileSetupPage implementation)
+    const [name, setName] = useState(profileData.name || '');
+    const [selectedLang, setSelectedLang] = useState(profileData.currentLanguage || 'Edo');
+
+    const title = isSetup ? 'Update Your Profile' : 'Welcome to EdoLingo! (Setup)';
+    const buttonText = isSetup ? 'Save Changes' : 'Start Learning';
+
+    const saveProfile = async () => {
+        if (!name.trim()) return;
+
+        try {
+            await setDoc(getProfileDocRef(userId), {
+                name: name.trim(),
+                currentLanguage: selectedLang,
+                userId: userId,
+                updatedAt: new Date().toISOString()
+            }, { merge: true });
+
+            updateLeaderboard(profileData.score || 0, name.trim(), selectedLang);
+            goTo('dashboard');
+        } catch (error) {
+            console.error("Error saving profile:", error);
+        }
+    };
+
+    return (
+        <div className="w-full max-w-xl mx-auto p-6 text-gray-100">
+            <div className="text-center mb-8">
+                <h2 className="text-5xl font-black text-white">EDO<span className="text-yellow-400">LINGO</span></h2>
+                <p className="text-gray-400 mt-2 text-xl">Learn the rich languages of Edo State with AI.</p>
+            </div>
+
+            <h2 className="text-3xl font-bold text-yellow-400 mb-6">{title}</h2>
+
+            <div className="space-y-6">
+                <div>
+                    <label htmlFor="profile-name" className="block text-sm font-medium text-gray-300 mb-2">Your Display Name</label>
+                    <input
+                        type="text"
+                        id="profile-name"
+                        value={name}
+                        onChange={(e) => setName(e.target.value)}
+                        placeholder="E.g., Osakioduwa"
+                        className="w-full p-3 border-2 border-gray-700 bg-gray-900 rounded-lg text-lg text-gray-100 focus:border-yellow-400 transition"
+                    />
+                </div>
+
+                <div>
+                    <h3 className="text-xl font-semibold border-b border-gray-700 pb-2 text-gray-300 mb-4">
+                        Primary Language Focus
+                    </h3>
+                    <div className="grid grid-cols-2 gap-4">
+                        {availableLanguages.map(lang => (
+                            <label key={lang.name} className={`flex items-center p-4 border-2 rounded-lg transition cursor-pointer ${lang.name === selectedLang ? 'border-yellow-400 bg-gray-800' : 'border-gray-700 bg-gray-900'}`}>
+                                <input
+                                    type="radio"
+                                    name="currentLanguage"
+                                    value={lang.name}
+                                    checked={lang.name === selectedLang}
+                                    onChange={() => setSelectedLang(lang.name)}
+                                    className="mr-3 h-5 w-5 text-yellow-400 focus:ring-yellow-500"
+                                />
+                                <span className={`${lang.name === selectedLang ? 'text-white' : 'text-gray-400'} font-semibold`}>{lang.name}</span>
+                            </label>
+                        ))}
+                    </div>
+                </div>
+            </div>
+
+            <div className="mt-8 space-y-4">
+                <EdoButton onClick={saveProfile} primary={true} disabled={!name.trim()}>{buttonText}</EdoButton>
+                {isSetup && <EdoButton onClick={() => goTo('dashboard')} primary={false}>Return to Dashboard</EdoButton>}
+            </div>
+        </div>
+    );
+};
+
+const DashboardPage = ({ profileData, progressData, goTo }) => {
+    // ... (DashboardPage implementation)
+    const currentLang = profileData.currentLanguage || 'Edo';
+    const langConfig = availableLanguages.find(l => l.name === currentLang) || availableLanguages[0];
+
+    return (
+        <div className="space-y-6 text-gray-100 p-2">
+            <h2 className="text-4xl font-extrabold text-yellow-400 border-b border-gray-700 pb-3">
+                Welcome back, {profileData.name}!
+            </h2>
+
+            {/* Stats Grid */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div className="p-4 bg-yellow-900/30 rounded-xl shadow-lg border border-yellow-700 flex flex-col items-start">
+                    <Zap className="h-6 w-6 text-yellow-300 mb-1" />
+                    <p className="text-sm text-yellow-300">Total XP</p>
+                    <p className="text-3xl font-bold">{progressData.score}</p>
+                </div>
+                <div className="p-4 bg-blue-900/30 rounded-xl shadow-lg border border-blue-700 flex flex-col items-start">
+                    <CheckCircle className="h-6 w-6 text-blue-300 mb-1" />
+                    <p className="text-sm text-blue-300">Lessons Mastered</p>
+                    <p className="text-3xl font-bold">{progressData.lessonsCompleted}</p>
+                </div>
+                <div className="p-4 bg-green-900/30 rounded-xl shadow-lg border border-green-700 flex flex-col items-start">
+                    <Home className="h-6 w-6 text-green-300 mb-1" />
+                    <p className="text-sm text-green-300">Focus Language</p>
+                    <p className={`text-3xl font-bold ${langConfig.color}`}>{currentLang}</p>
+                </div>
+            </div>
+
+            {/* AI Learning Module Entry */}
+            <div className={`p-6 bg-gray-800 rounded-xl shadow-xl border ${langConfig.theme.split(' ')[0]}`}>
+                <h3 className="text-2xl font-bold text-white mb-2">Start AI Lingo Quiz</h3>
+                <p className="text-gray-400 mb-4">
+                    Practice key vocabulary and phrases in <span className="font-semibold">{currentLang}</span>. Our AI generates dynamic quizzes for you.
+                </p>
+                <EdoButton onClick={() => goTo('learn')} primary={true}>
+                    Go to Learning Module
+                </EdoButton>
+            </div>
+            
+             {/* Translation Module Entry */}
+            <div className={`p-6 bg-gray-800 rounded-xl shadow-xl border border-gray-700`}>
+                <h3 className="text-2xl font-bold text-white mb-2">Translate & Pronounce</h3>
+                <p className="text-gray-400 mb-4">
+                    Get instant, spoken translations for any phrase you need in <span className="font-semibold">{currentLang}</span>.
+                </p>
+                <EdoButton onClick={() => goTo('translate')} primary={false} className="border-blue-400 text-blue-400 hover:bg-blue-400 hover:text-gray-900">
+                    Go to Translator
+                </EdoButton>
+            </div>
+        </div>
+    );
+};
+
+const LearningPage = ({ profileData, progressData, updateLeaderboard, getProgressDocRef }) => {
+    // ... (LearningPage implementation - mostly unchanged, just state/logic inside)
+
+    const [currentQuiz, setCurrentQuiz] = useState(null);
+    const [isLoading, setIsLoading] = useState(false);
+    const [selectedAnswer, setSelectedAnswer] = useState(null);
+    const [feedback, setFeedback] = useState(null);
+
+    const targetLang = profileData.currentLanguage || 'Edo';
+
+    const generateQuizQuestion = async (baseWord) => {
+        const systemPrompt = `You are an expert linguist and educator specializing in the languages of Edo State, Nigeria. Your task is to generate a vocabulary quiz question. The question must be in English, and the correct answer must be the ${targetLang} translation of the word. You must also provide exactly three plausible but incorrect answers (distractors) that are also ${targetLang} words or sound similar to the correct answer. The output must be a valid JSON object strictly following the provided schema.`;
+
+        const userQuery = `Generate a quiz question focusing on the English word "${baseWord}" and its translation into the ${targetLang} language.`;
+
+        const responseSchema = {
+            type: "OBJECT",
+            properties: {
+                question: { type: "STRING" },
+                correctAnswer: { type: "STRING" },
+                distractors: { type: "ARRAY", items: { type: "STRING" }, minItems: 3, maxItems: 3 }
+            },
+            required: ["question", "correctAnswer", "distractors"]
+        };
+
+        const payload = {
+            contents: [{ parts: [{ text: userQuery }] }],
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            generationConfig: {
+                responseMimeType: "application/json",
+                responseSchema: responseSchema
+            },
+        };
+
+        let response = null;
+        let attempts = 0;
+        const maxAttempts = 5;
+
+        while (attempts < maxAttempts) {
+            attempts++;
+            try {
+                response = await fetch(TEXT_GEN_API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (response.ok) break;
+
+                if (response.status === 429 && attempts < maxAttempts) {
+                    const delay = Math.pow(2, attempts) * 1000 + Math.random() * 1000;
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                } else {
+                    throw new Error(`API returned status ${response.status}`);
+                }
+            } catch (e) {
+                if (attempts === maxAttempts) throw e;
+            }
+        }
+
+        if (!response || !response.ok) throw new Error("Failed to get a successful response from the API.");
+
+        const result = await response.json();
+        const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!jsonText) throw new Error("AI returned an empty response.");
+
+        const quizData = JSON.parse(jsonText);
+        return quizData;
+    };
+
+
+    const loadNewQuiz = useCallback(async () => {
+        setIsLoading(true);
+        setSelectedAnswer(null);
+        setFeedback(null);
+        setCurrentQuiz(null);
+
+        const wordToTranslate = commonWords[Math.floor(Math.random() * commonWords.length)];
+
+        try {
+            const quizData = await generateQuizQuestion(wordToTranslate);
+            const options = [...quizData.distractors, quizData.correctAnswer];
+            options.sort(() => Math.random() - 0.5); // Shuffle
+
+            setCurrentQuiz({ ...quizData, options, baseWord: wordToTranslate });
+        } catch (error) {
+            console.error("Quiz Generation Failed:", error);
+            setFeedback({ type: 'error', message: 'AI Quiz Generation Failed. Please try again.' });
+        } finally {
+            setIsLoading(false);
+        }
+    }, [targetLang]);
+
+    useEffect(() => {
+        loadNewQuiz();
+    }, [loadNewQuiz]);
+
+    const handleSelectAnswer = (option) => {
+        if (selectedAnswer) return;
+        setSelectedAnswer(option);
+    };
+
+    const updateProgress = useCallback(async (isCorrect) => {
+        const progressRef = getProgressDocRef(authInstance.currentUser.uid);
+        let newScore = progressData.score || 0;
+        let newLessons = progressData.lessonsCompleted || 0;
+
+        if (isCorrect) {
+            newScore += 10;
+            newLessons += 1;
+        } else {
+            newScore = Math.max(0, newScore - 2);
+        }
+
+        try {
+            await setDoc(progressRef, {
+                score: newScore,
+                lessonsCompleted: newLessons,
+                lastActivity: new Date().toISOString()
+            }, { merge: true });
+
+            updateLeaderboard(newScore, profileData.name, profileData.currentLanguage);
+        } catch (error) {
+            console.error("Failed to update user progress:", error);
+        }
+    }, [progressData, profileData, updateLeaderboard, getProgressDocRef]);
+
+    const checkAnswer = () => {
+        if (!selectedAnswer || !currentQuiz) return;
+
+        const isCorrect = selectedAnswer === currentQuiz.correctAnswer;
+        if (isCorrect) {
+            setFeedback({ type: 'correct', message: "Correct! Excellent work." });
+        } else {
+            setFeedback({ type: 'wrong', message: `Incorrect. The correct answer is: ${currentQuiz.correctAnswer}` });
+        }
+        updateProgress(isCorrect);
+    };
+
+    if (isLoading || !currentQuiz) {
+        return <LoadingState message={`Generating a new ${targetLang} vocabulary quiz...`} />;
+    }
+
+    const progressPercent = (progressData.lessonsCompleted % 10) * 10;
+    const progressLevel = Math.floor(progressData.lessonsCompleted / 10) + 1;
+
+    return (
+        <div className="space-y-6 text-gray-100 p-2">
+            <h2 className="text-4xl font-extrabold text-yellow-400 border-b border-gray-700 pb-3">AI Lingo Quiz - {targetLang}</h2>
+
+            {/* Progress Bar (Unchanged) */}
+            <div className="flex justify-between text-sm text-gray-400">
+                <span>XP: {progressData.score}</span>
+                <span>Level: {progressLevel}</span>
+            </div>
+            <div className="w-full bg-gray-700 rounded-full h-2.5">
+                <div className="bg-yellow-400 h-2.5 rounded-full transition-all duration-500" style={{ width: `${progressPercent}%` }}></div>
+            </div>
+
+            {/* Question Card (Unchanged) */}
+            <div className="p-6 bg-gray-800 rounded-xl shadow-xl border border-gray-700">
+                <p className="text-xl font-medium text-gray-300 mb-2">English Word:</p>
+                <p className="text-4xl font-bold text-white mb-6">{currentQuiz.baseWord.toUpperCase()}</p>
+                
+                <p className="text-xl font-medium text-gray-300 mb-4">{currentQuiz.question}</p>
+                
+                {/* Options Grid */}
+                <div className="grid grid-cols-1 gap-4">
+                    {currentQuiz.options.map(option => {
+                        let cardClass = 'bg-gray-700 border-2 border-transparent hover:border-yellow-400';
+                        if (feedback) {
+                            if (option === currentQuiz.correctAnswer) {
+                                cardClass = 'bg-green-800/50 border-green-400';
+                            } else if (option === selectedAnswer) {
+                                cardClass = 'bg-red-800/50 border-red-400';
+                            } else {
+                                cardClass = 'bg-gray-900 border-gray-700 opacity-60';
+                            }
+                        } else if (option === selectedAnswer) {
+                            cardClass = 'bg-gray-800 border-yellow-400';
+                        }
+
+                        return (
+                            <button
+                                key={option}
+                                className={`p-4 rounded-xl shadow-md text-left text-lg font-semibold transition w-full ${cardClass} disabled:cursor-not-allowed`}
+                                onClick={() => handleSelectAnswer(option)}
+                                disabled={!!feedback || isLoading}
+                            >
+                                {option}
+                            </button>
+                        );
+                    })}
+                </div>
+            </div>
+
+            {/* Feedback Message (Unchanged) */}
+            {feedback && (
+                <div className={`text-center font-bold text-2xl pt-2 ${feedback.type === 'correct' ? 'text-green-400' : 'text-red-400'}`}>
+                    {feedback.type === 'correct' ? <CheckCircle className="inline h-6 w-6 mr-2" /> : <XCircle className="inline h-6 w-6 mr-2" />}
+                    {feedback.message}
+                </div>
+            )}
+
+            {/* Action Button (Unchanged) */}
+            <div className="flex justify-between items-center pt-4 space-x-4">
+                <EdoButton onClick={() => goTo('dashboard')} primary={false} className="w-1/3">
+                    Exit
+                </EdoButton>
+                {feedback ? (
+                    <EdoButton onClick={loadNewQuiz} primary={true} className="w-2/3">
+                        Next Question
+                    </EdoButton>
+                ) : (
+                    <EdoButton onClick={checkAnswer} primary={true} disabled={!selectedAnswer} className="w-2/3">
+                        Check Answer
+                    </EdoButton>
+                )}
+            </div>
+        </div>
+    );
+};
+
+// --- NEW 5. Translator Page (Translation and TTS) ---
+const TranslatorPage = ({ profileData }) => {
+    const targetLang = profileData.currentLanguage || 'Edo';
+    const [englishInput, setEnglishInput] = useState('');
+    const [translatedText, setTranslatedText] = useState('');
+    const [isTranslating, setIsTranslating] = useState(false);
+    const [isSpeaking, setIsSpeaking] = useState(false);
+    const [error, setError] = useState('');
+
+    const handleTranslate = useCallback(async () => {
+        if (!englishInput.trim()) return;
+        setIsTranslating(true);
+        setTranslatedText('');
+        setError('');
+        
+        const systemPrompt = `You are a helpful language model specializing in the languages of Edo State. Translate the following English phrase into ${targetLang}. Only provide the translated phrase, nothing else. If the translation is not possible, state "Translation not available."`;
+        const userQuery = englishInput.trim();
+
+        const payload = {
+            contents: [{ parts: [{ text: userQuery }] }],
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+        };
+        
+        let response = null;
+        let attempts = 0;
+        const maxAttempts = 3;
+
+        try {
+            while (attempts < maxAttempts) {
+                attempts++;
+                response = await fetch(TEXT_GEN_API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (response.ok) break;
+
+                if (response.status === 429 && attempts < maxAttempts) {
+                    const delay = Math.pow(2, attempts) * 1000 + Math.random() * 1000;
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                } else {
+                    throw new Error(`API returned status ${response.status}`);
+                }
+            }
+            
+            if (!response || !response.ok) throw new Error("Failed to get a successful response from the Translation API.");
+
+            const result = await response.json();
+            const text = result.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || 'Translation not available.';
+            setTranslatedText(text);
+
+        } catch (e) {
+            console.error("Translation error:", e);
+            setError('Could not complete translation. Please try again.');
+        } finally {
+            setIsTranslating(false);
+        }
+    }, [englishInput, targetLang]);
+
+    const handleTTS = async () => {
+        if (!translatedText || translatedText.includes("Translation not available")) return;
+        setIsSpeaking(true);
+        setError('');
+
+        const payload = {
+            contents: [{
+                parts: [{ text: `Say this ${targetLang} phrase: ${translatedText}` }]
+            }],
+            generationConfig: {
+                responseModalities: ["AUDIO"],
+                speechConfig: {
+                    voiceConfig: {
+                        prebuiltVoiceConfig: { voiceName: "Kore" } // Using Kore voice
+                    }
+                }
+            },
+            model: "gemini-2.5-flash-preview-tts"
+        };
+
+        try {
+            const response = await fetch(TTS_API_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) throw new Error("TTS API Error.");
+
+            const result = await response.json();
+            const part = result?.candidates?.[0]?.content?.parts?.[0];
+            const audioData = part?.inlineData?.data;
+            const mimeType = part?.inlineData?.mimeType;
+
+            if (audioData && mimeType && mimeType.startsWith("audio/L16")) {
+                // Extract sample rate from mimeType (e.g., audio/L16;rate=24000)
+                const rateMatch = mimeType.match(/rate=(\d+)/);
+                const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 24000; 
+                
+                const pcmData = base64ToArrayBuffer(audioData);
+                const pcm16 = new Int16Array(pcmData);
+                const wavBlob = pcmToWav(pcm16, sampleRate);
+                const audioUrl = URL.createObjectURL(wavBlob);
+                
+                const audio = new Audio(audioUrl);
+                audio.onended = () => setIsSpeaking(false);
+                audio.onerror = () => { console.error("Audio playback failed"); setIsSpeaking(false); };
+                audio.play();
+                
+            } else {
+                throw new Error("Invalid audio format received.");
+            }
+        } catch (e) {
+            console.error("TTS generation error:", e);
+            setError('Audio pronunciation failed. The phrase might be too complex or an API error occurred.');
+            setIsSpeaking(false);
+        }
+    };
+    
+    // Suggest common phrases if input is empty
+    const handleQuickPhrase = (phrase) => {
+        setEnglishInput(phrase);
+        handleTranslate(phrase); // Immediately translate the phrase
+    };
+
+    return (
+        <div className="space-y-6 text-gray-100 p-2">
+            <h2 className="text-4xl font-extrabold text-blue-400 border-b border-gray-700 pb-3">
+                AI Translator - {targetLang}
+            </h2>
+            <p className="text-gray-400">Instantly translate and hear phrases in {targetLang}.</p>
+
+            {/* Input Area */}
+            <div className="flex space-x-2">
+                <input
+                    type="text"
+                    value={englishInput}
+                    onChange={(e) => setEnglishInput(e.target.value)}
+                    placeholder="Enter English phrase here..."
+                    className="flex-grow p-3 border-2 border-gray-700 bg-gray-900 rounded-xl text-lg text-gray-100 focus:border-blue-400 transition"
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleTranslate(); }}
+                    disabled={isTranslating}
+                />
+                <button 
+                    onClick={handleTranslate} 
+                    disabled={isTranslating || !englishInput.trim()}
+                    className="bg-blue-600 text-white rounded-xl p-3 hover:bg-blue-500 transition disabled:bg-gray-700 disabled:text-gray-500"
+                >
+                    {isTranslating ? <Loader2 className="h-6 w-6 animate-spin" /> : <Send className="h-6 w-6" />}
+                </button>
+            </div>
+            
+            {/* Output Area */}
+            <div className="p-4 bg-gray-800 rounded-xl shadow-xl border border-gray-700 min-h-[100px] flex flex-col justify-between">
+                <div>
+                    <p className="text-sm font-medium text-blue-400 mb-1">Translation in {targetLang}:</p>
+                    <p className="text-2xl font-bold text-white">
+                        {translatedText || (isTranslating ? '...' : 'Translated phrase will appear here.')}
+                    </p>
+                </div>
+                {translatedText && !translatedText.includes("Translation not available") && (
+                    <div className="mt-4 flex justify-end">
+                         <button 
+                            onClick={handleTTS} 
+                            disabled={isSpeaking || isTranslating}
+                            className="flex items-center space-x-2 bg-yellow-400 text-gray-900 px-4 py-2 rounded-lg font-bold hover:bg-yellow-300 disabled:bg-gray-700 disabled:text-gray-500 transition"
+                        >
+                            {isSpeaking ? (
+                                <>
+                                    <Loader2 className="h-5 w-5 animate-spin" />
+                                    <span>Speaking...</span>
+                                </>
+                            ) : (
+                                <>
+                                    <Volume2 className="h-5 w-5" />
+                                    <span>Hear Pronunciation</span>
+                                </>
+                            )}
+                        </button>
+                    </div>
+                )}
+            </div>
+
+            {error && <p className="text-red-400 text-sm">{error}</p>}
+            
+            {/* Quick Phrases */}
+            <div className="pt-2">
+                <h3 className="text-lg font-semibold text-gray-300 mb-3">Quick Phrases:</h3>
+                <div className="flex flex-wrap gap-2">
+                    {commonWords.slice(0, 6).map(phrase => (
+                        <button 
+                            key={phrase}
+                            onClick={() => handleQuickPhrase(phrase)}
+                            className="text-sm px-3 py-1.5 rounded-full bg-gray-700 text-gray-300 hover:bg-gray-600 transition"
+                            disabled={isTranslating || isSpeaking}
+                        >
+                            {phrase}
+                        </button>
+                    ))}
+                </div>
+            </div>
+        </div>
+    );
+};
+
+
+const LeaderboardPage = ({ progressData, leaderboardData }) => {
+    // ... (LeaderboardPage implementation)
+    return (
+        <div className="space-y-6 text-gray-100 p-2">
+            <h2 className="text-4xl font-extrabold text-yellow-400 border-b border-gray-700 pb-3">Global EdoLingo Leaderboard</h2>
+            <p className="text-gray-400">
+                See how you rank among the Edo State language learners worldwide. Your score: <span className="text-yellow-400 font-bold">{progressData.score} XP</span>
+            </p>
+
+            <ul className="space-y-3">
+                {leaderboardData.length === 0 ? (
+                    <li className="text-gray-500 p-4 bg-gray-800 rounded-xl">Leaderboard data is loading or empty.</li>
+                ) : (
+                    leaderboardData.map((entry, index) => {
+                        const isUser = entry.id === authInstance.currentUser?.uid;
+                        const rank = index + 1;
+                        const rankColor = rank === 1 ? 'text-yellow-400' : rank === 2 ? 'text-gray-400' : rank === 3 ? 'text-amber-600' : 'text-gray-500';
+
+                        return (
+                            <li key={entry.id} className={`flex justify-between items-center p-4 rounded-xl transition duration-300 ${isUser ? 'bg-yellow-900/40 border-2 border-yellow-400 scale-[1.02]' : 'bg-gray-800 border-2 border-gray-700'}`}>
+                                <div className="flex items-center space-x-4">
+                                    <span className={`text-xl font-extrabold w-8 text-center ${rankColor}`}>#{rank}</span>
+                                    <span className={`text-lg ${isUser ? 'text-white font-bold' : 'text-gray-300'}`}>{entry.name} {isUser && '(You)'}</span>
+                                    <span className="text-xs text-gray-500 rounded-full bg-gray-700 px-3 py-1.5 font-semibold">{entry.currentLanguage}</span>
+                                </div>
+                                <span className="text-xl font-bold text-yellow-400">{entry.score} XP</span>
+                            </li>
+                        );
+                    })
+                )}
+            </ul>
+        </div>
+    );
+};
+
+
+// --- Main App Component ---
+const App = () => {
+    const { userId, isAuthReady, profileData, progressData, leaderboardData, updateLeaderboard, getProfileDocRef, getProgressDocRef } = useFirebaseData();
+    const [currentPage, setCurrentPage] = useState('dashboard');
+
+    const goTo = (page) => setCurrentPage(page);
+
+    const isSetupRequired = profileData.name === 'New Learner' || !userId;
+
+    if (!isAuthReady) {
+        return <LoadingState message="Connecting to EdoLingo network..." />;
+    }
+
+    if (isSetupRequired && currentPage !== 'profile') {
+        return (
+            <div className="w-full max-w-2xl mx-auto p-4 flex flex-col min-h-screen sm:min-h-0">
+                <ProfileSetupPage
+                    profileData={profileData}
+                    userId={userId}
+                    isSetup={false}
+                    goTo={goTo}
+                    updateLeaderboard={updateLeaderboard}
+                    getProfileDocRef={getProfileDocRef}
+                />
+            </div>
+        );
+    }
+
+    let PageComponent;
+    switch (currentPage) {
+        case 'dashboard':
+            PageComponent = DashboardPage;
+            break;
+        case 'learn':
+            PageComponent = LearningPage;
+            break;
+        case 'leaderboard':
+            PageComponent = LeaderboardPage;
+            break;
+        case 'profile':
+            PageComponent = ProfileSetupPage;
+            break;
+        case 'translate':
+            PageComponent = TranslatorPage;
+            break;
+        default:
+            PageComponent = DashboardPage;
+    }
+
+    const pageProps = {
+        profileData,
+        progressData,
+        leaderboardData,
+        goTo,
+        userId,
+        updateLeaderboard,
+        getProfileDocRef,
+        getProgressDocRef,
+        isSetup: true,
+    };
+
+    return (
+        <div className="w-full max-w-2xl mx-auto bg-gray-900 border border-gray-800 rounded-t-xl shadow-2xl min-h-screen flex flex-col">
+            <NavBar profileData={profileData} progressData={progressData} goTo={goTo} currentPage={currentPage} />
+
+            <main className="flex-grow p-4 overflow-y-auto">
+                <PageComponent {...pageProps} />
+            </main>
+
+            <MobileNav goTo={goTo} currentPage={currentPage} />
+        </div>
+    );
+};
+
+const NavBar = ({ profileData, progressData, goTo, currentPage }) => {
+    const currentLang = profileData.currentLanguage || 'Edo';
+    const langStyle = availableLanguages.find(l => l.name === currentLang)?.color || 'text-gray-400';
+
+    return (
+        <nav className="hidden sm:flex justify-between items-center p-4 border-b border-gray-700 sticky top-0 z-10 bg-gray-900 rounded-t-xl">
+            <h1 className="text-3xl font-black text-white">EDO<span className="text-yellow-400">LINGO</span></h1>
+            <div className="flex items-center space-x-6">
+                <div className="flex flex-col items-end">
+                    <span className="text-xs text-gray-500">Focus</span>
+                    <span className={`text-base font-semibold ${langStyle}`}>{currentLang}</span>
+                </div>
+                <div className="flex flex-col items-end">
+                    <span className="text-xs text-gray-500">XP</span>
+                    <span className="text-xl font-bold text-gray-300">{progressData.score}</span>
+                </div>
+                <NavItem icon={Home} label="Dashboard" page="dashboard" current={currentPage} goTo={goTo} desktop={true} />
+                <NavItem icon={Zap} label="Learn" page="learn" current={currentPage} goTo={goTo} desktop={true} />
+                <NavItem icon={MessageSquare} label="Translate" page="translate" current={currentPage} goTo={goTo} desktop={true} />
+                <NavItem icon={Trophy} label="Leaderboard" page="leaderboard" current={currentPage} goTo={goTo} desktop={true} />
+                <NavItem icon={User} label="Profile" page="profile" current={currentPage} goTo={goTo} desktop={true} />
+            </div>
+        </nav>
+    );
+};
+
+const NavItem = ({ icon: Icon, label, page, current, goTo, desktop = false }) => {
+    const isActive = current === page;
+    const baseClasses = "flex items-center justify-center transition-colors font-medium";
+    const activeClasses = isActive ? 'text-yellow-400' : 'text-gray-400 hover:text-white';
+    const desktopClasses = desktop ? 'space-x-1' : 'flex-col space-y-1 text-xs';
+
+    return (
+        <button
+            onClick={() => goTo(page)}
+            className={`${baseClasses} ${activeClasses} ${desktopClasses} ${!desktop ? 'w-full py-2' : ''}`}
+        >
+            <Icon className="h-5 w-5" />
+            <span className={desktop ? 'text-sm' : ''}>{label}</span>
+        </button>
+    );
+};
+
+const MobileNav = ({ goTo, currentPage }) => (
+    <div className="sm:hidden sticky bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-700 shadow-2xl">
+        <div className="flex justify-around">
+            <NavItem icon={Home} label="Home" page="dashboard" current={currentPage} goTo={goTo} />
+            <NavItem icon={Zap} label="Learn" page="learn" current={currentPage} goTo={goTo} />
+            <NavItem icon={MessageSquare} label="Translate" page="translate" current={currentPage} goTo={goTo} />
+            <NavItem icon={Trophy} label="Board" page="leaderboard" current={currentPage} goTo={goTo} />
+            <NavItem icon={User} label="Profile" page="profile" current={currentPage} goTo={goTo} />
+        </div>
+    </div>
+);
+
+export default App;
